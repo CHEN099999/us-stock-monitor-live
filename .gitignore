@@ -1,0 +1,19 @@
+# 本地密钥（绝不提交）
+.env
+config.yaml
+config.local.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# 日志和临时文件
+monitor.log
+*.log
+alerted_state.json.tmp
+
+# 系统文件
+Thumbs.db
+.DS_Store

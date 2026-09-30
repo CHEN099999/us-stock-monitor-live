@@ -1,0 +1,43 @@
+# 复制为 config.yaml 后填写真实持仓。
+# GitHub Actions 从 MONITOR_CONFIG Secret 读取完整配置，不提交此文件。
+
+positions:
+  - symbol: AAPL
+    name: Apple
+    qty: 1
+    cost_price: 100
+    market: us
+  - symbol: HSTECH
+    name: 恒生科技指数
+    qty: 1
+    cost_price: 5000
+    market: hk
+  - symbol: XAU
+    name: 伦敦金
+    qty: 1
+    cost_price: 3000
+    market: metal
+
+alerts:
+  daily_change_pct: 2.0
+  cost_change_pct: 10.0
+  portfolio_daily_pnl: 100
+  volume_ratio: 2.0
+  price_gap_pct: 2.0
+
+runtime:
+  log_file: monitor.log
+  state_file: alerted_state.json
+  market_open_cst: "21:30"
+  market_close_cst: "04:00"
+  winter_open_cst: "22:30"
+  winter_close_cst: "05:00"
+  monitor_24h: true
+
+push:
+  email:
+    enabled: true
+    username: ""
+    to: ""
+    smtp_server: smtp.qq.com
+    smtp_port: 465
