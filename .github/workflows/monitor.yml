@@ -41,6 +41,7 @@ jobs:
       - name: Run monitor
         env:
           STATE_KEY: ${{ secrets.STATE_KEY }}
+          LEDGER_KEY: ${{ secrets.LEDGER_KEY }}
           EMAIL_USERNAME: ${{ secrets.EMAIL_USERNAME }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
@@ -59,7 +60,7 @@ jobs:
             echo "No state file"
             exit 0
           fi
-          git add alerted_state.json
+          git add alerted_state.json alerted_ledger.json
           if ! git diff --staged --quiet; then
             git commit -m "chore: update monitor state $(date -u +'%Y-%m-%d %H:%M')"
             git pull --rebase --autostash origin main
