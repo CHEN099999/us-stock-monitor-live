@@ -28,6 +28,7 @@ alerts:
 runtime:
   log_file: monitor.log
   state_file: alerted_state.json
+  ledger_file: alerted_ledger.json
   market_open_cst: "21:30"
   market_close_cst: "04:00"
   winter_open_cst: "22:30"

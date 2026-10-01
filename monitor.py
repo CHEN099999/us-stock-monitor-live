@@ -451,6 +451,69 @@ def _state_cipher():
     return Fernet(key.encode("ascii"))
 
 
+def _ledger_path(cfg):
+    return BASE_DIR / cfg["runtime"].get(
+        "ledger_file", "alerted_ledger.json"
+    )
+
+
+def _ledger_key():
+    return (
+        os.environ.get("LEDGER_KEY", "").strip()
+        or os.environ.get("STATE_KEY", "").strip()
+    )
+
+
+def alert_fingerprint(alert_key):
+    key = _ledger_key()
+    material = str(alert_key).encode("utf-8")
+    if not key:
+        return hashlib.sha256(material).hexdigest()
+    return hmac.new(key.encode("utf-8"), material, hashlib.sha256).hexdigest()
+
+
+def is_alert_key(key):
+    return (
+        str(key).startswith("PORTFOLIO_")
+        or str(key).endswith(("_daily", "_cost", "_volume"))
+        or "_gap_" in str(key)
+    )
+
+
+def load_ledger(cfg):
+    path = _ledger_path(cfg)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logging.error("去重账本读取失败: %s", exc)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    cutoff = utc_now() - dt.timedelta(days=30)
+    cleaned = {}
+    for fingerprint, sent_at in data.items():
+        try:
+            parsed = dt.datetime.fromisoformat(str(sent_at))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC_TZ)
+            if parsed >= cutoff:
+                cleaned[str(fingerprint)] = parsed.isoformat()
+        except ValueError:
+            continue
+    return cleaned
+
+
+def save_ledger(cfg, ledger):
+    path = _ledger_path(cfg)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    payload = json.dumps(ledger, ensure_ascii=False, indent=2, sort_keys=True)
+    tmp_path.write_text(payload, encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
 def load_state(cfg):
     path = BASE_DIR / cfg["runtime"]["state_file"]
     if not path.exists():
@@ -633,6 +696,15 @@ def main():
     logging.info("开始检测 %s 只标的", len(symbols))
 
     state = load_state(cfg)
+    ledger = load_ledger(cfg)
+    for key, value in state.items():
+        if is_alert_key(key) and value != "pending":
+            ledger.setdefault(alert_fingerprint(key), str(value))
+    logging.info(
+        "状态项 %s 个，去重账本 %s 条",
+        len(state),
+        len(ledger),
+    )
     quotes = fetch_sina_realtime(positions)
     if not quotes:
         logging.error("未获取到任何行情数据，退出")
@@ -659,6 +731,8 @@ def main():
     pending = state.setdefault("pending_alerts", [])
     pending_keys = {alert["key"] for alert in pending}
     for alert in alerts:
+        if alert_fingerprint(alert["key"]) in ledger:
+            continue
         if alert["key"] not in state:
             state[alert["key"]] = "pending"
         if alert["key"] not in pending_keys:
@@ -670,6 +744,7 @@ def main():
         sent_at = beijing_now().isoformat()
         for alert in pending:
             state[alert["key"]] = sent_at
+            ledger[alert_fingerprint(alert["key"])] = sent_at
         state["pending_alerts"] = []
         logging.info("已成功推送 %s 条异动", len(pending))
     elif pending:
@@ -679,6 +754,7 @@ def main():
         )
 
     save_state(cfg, state)
+    save_ledger(cfg, ledger)
 
 
 if __name__ == "__main__":
