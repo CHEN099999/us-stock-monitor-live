@@ -458,10 +458,13 @@ def _ledger_path(cfg):
 
 
 def _ledger_key():
-    return (
-        os.environ.get("LEDGER_KEY", "").strip()
+    secret = (
+        os.environ.get("EMAIL_PASSWORD", "").strip()
         or os.environ.get("STATE_KEY", "").strip()
     )
+    if not secret:
+        return ""
+    return hashlib.sha256(f"monitor-ledger:{secret}".encode("utf-8")).hexdigest()
 
 
 def alert_fingerprint(alert_key):
