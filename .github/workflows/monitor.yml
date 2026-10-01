@@ -41,7 +41,6 @@ jobs:
       - name: Run monitor
         env:
           STATE_KEY: ${{ secrets.STATE_KEY }}
-          LEDGER_KEY: ${{ secrets.LEDGER_KEY }}
           EMAIL_USERNAME: ${{ secrets.EMAIL_USERNAME }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
