@@ -2,6 +2,7 @@
 
 import datetime as dt
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -158,6 +159,119 @@ class PendingAlertTests(unittest.TestCase):
                 ]
                 self.assertTrue(sent_values)
                 self.assertTrue(all(value != "pending" for value in sent_values))
+
+
+class AlertGroupingTests(unittest.TestCase):
+    def _config(self):
+        return {
+            "positions": [
+                {
+                    "symbol": "AAPL",
+                    "name": "Apple",
+                    "qty": 1,
+                    "cost_price": 100,
+                    "market": "us",
+                },
+                {
+                    "symbol": "HSTECH",
+                    "name": "恒生科技指数",
+                    "qty": 1,
+                    "cost_price": 1000,
+                    "market": "hk",
+                },
+                {
+                    "symbol": "XAU",
+                    "name": "伦敦金",
+                    "qty": 1,
+                    "cost_price": 1000,
+                    "market": "metal",
+                },
+            ],
+            "alerts": {
+                "daily_change_pct": 2,
+                "cost_change_pct": 999,
+                "portfolio_daily_pnl": 100,
+                "volume_ratio": 999,
+                "price_gap_pct": 999,
+            },
+            "runtime": {
+                "log_file": "monitor.log",
+                "state_file": "alerted_state.json",
+            },
+            "push": {},
+        }
+
+    def _quotes(self):
+        return {
+            symbol: {
+                "name": symbol,
+                "price": 110.0,
+                "change_pct": 10.0,
+                "change_amt": 10.0,
+                "prev_close": 100.0,
+                "open": 100.0,
+                "high": 111.0,
+                "low": 99.0,
+                "volume": 1000,
+            }
+            for symbol in ("AAPL", "HSTECH", "XAU")
+        }
+
+    def test_alerts_are_tagged_by_market_group(self):
+        alerts, group_pnl = monitor.detect_alerts(
+            self._config(), self._quotes(), {}
+        )
+        self.assertEqual(
+            {alert["group"] for alert in alerts},
+            {"us", "hk", "metal"},
+        )
+        self.assertAlmostEqual(group_pnl["us"], 10.0)
+        self.assertAlmostEqual(group_pnl["hk"], 10.0)
+        self.assertAlmostEqual(group_pnl["metal"], 10.0)
+
+    def test_main_calls_push_once_per_market_group(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                mock.patch.object(monitor, "BASE_DIR", Path(tmp)),
+                mock.patch.object(monitor, "load_config", return_value=self._config()),
+                mock.patch.object(monitor, "setup_logging"),
+                mock.patch.object(monitor, "in_market_hours", return_value=True),
+                mock.patch.object(
+                    monitor, "fetch_sina_realtime", return_value=self._quotes()
+                ),
+                mock.patch.object(monitor, "get_avg_volume", return_value=0),
+                mock.patch.object(
+                    monitor, "send_alerts", return_value=True
+                ) as send_alerts,
+            ):
+                monitor.main()
+
+        self.assertEqual(send_alerts.call_count, 3)
+        self.assertEqual(
+            [call.args[2] for call in send_alerts.call_args_list],
+            ["us", "hk", "metal"],
+        )
+
+
+class LedgerTests(unittest.TestCase):
+    def test_alert_fingerprint_is_stable_and_keyed(self):
+        with mock.patch.dict(
+            os.environ, {"EMAIL_PASSWORD": "test-key"}, clear=False
+        ):
+            first = monitor.alert_fingerprint("AAPL_2026-10-01_daily")
+            second = monitor.alert_fingerprint("AAPL_2026-10-01_daily")
+        with mock.patch.dict(
+            os.environ, {"EMAIL_PASSWORD": "other-key"}, clear=False
+        ):
+            different = monitor.alert_fingerprint("AAPL_2026-10-01_daily")
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, different)
+        self.assertEqual(len(first), 64)
+
+    def test_alert_key_detection(self):
+        self.assertTrue(monitor.is_alert_key("AAPL_2026-10-01_daily"))
+        self.assertTrue(monitor.is_alert_key("PORTFOLIO_2026-10-01_pnl"))
+        self.assertFalse(monitor.is_alert_key("lastprice_AAPL"))
 
 
 if __name__ == "__main__":
