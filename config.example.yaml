@@ -7,11 +7,15 @@ positions:
     qty: 1
     cost_price: 100
     market: us
+  # 指数类标的（恒生科技指数）：没有货币价格，按"持仓金额 × 当日涨跌幅"折人民币。
+  # 持仓金额默认 = qty × cost_price，可用 position_value 直接指定（元）。
   - symbol: HSTECH
     name: 恒生科技指数
     qty: 1
-    cost_price: 5000
+    cost_price: 5665
     market: hk
+    # position_value: 5665   # 可选：直接指定持仓金额（人民币）
+    # pnl_mode: value        # 可选：value=按持仓金额×涨跌幅（默认）；price=按价格变动
   - symbol: XAU
     name: 伦敦金
     qty: 1
@@ -34,6 +38,12 @@ runtime:
   winter_open_cst: "22:30"
   winter_close_cst: "05:00"
   monitor_24h: true
+
+# 组合盈亏显示币种：美股=美元，港股科技/黄金=人民币。
+# 汇率留空则自动从新浪获取（美元/人民币、港币/人民币）。
+display:
+  usd_cny: ""
+  hkd_cny: ""
 
 push:
   email:

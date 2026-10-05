@@ -35,6 +35,24 @@ GROUP_LABELS = {
     "metal": "黄金",
 }
 GROUP_ORDER = ("us", "hk", "metal")
+# 组合盈亏的显示口径：美股按美元，港股科技/黄金按人民币
+GROUP_CURRENCY = {
+    "us": "USD",
+    "hk": "CNY",
+    "metal": "CNY",
+}
+CURRENCY_SYMBOL = {
+    "USD": "$",
+    "CNY": "¥",
+}
+FX_SINA_CODES = {
+    "usd_cny": "USDCNY",
+    "hkd_cny": "HKDCNY",
+}
+DEFAULT_FX = {
+    "usd_cny": 7.0,
+    "hkd_cny": 0.90,
+}
 
 
 def load_dotenv():
@@ -264,6 +282,75 @@ def fetch_sina_realtime(positions):
     return parse_sina_response(response.text, positions)
 
 
+def position_value_cny(pos, quantity, cost):
+    """持仓金额（人民币）。
+
+    优先使用 positions[].position_value；没有配置时按 qty × 成本价估算。
+    用于指数类标的（没有货币价格）折算人民币盈亏。
+    """
+    try:
+        explicit = float(pos.get("position_value") or 0)
+    except (TypeError, ValueError):
+        explicit = 0.0
+    if explicit > 0:
+        return explicit
+    return quantity * cost
+
+
+def fetch_fx_rates(cfg):
+    """获取美元/港币兑人民币汇率。
+
+    优先读 config.yaml 的 display.usd_cny / display.hkd_cny（可写死），
+    没配置则从新浪获取，失败时退回 DEFAULT_FX。
+    """
+    display = cfg.get("display", {}) or {}
+    rates = dict(DEFAULT_FX)
+    missing = []
+    for key in ("usd_cny", "hkd_cny"):
+        raw = display.get(key)
+        if raw in (None, "", 0):
+            missing.append(key)
+            continue
+        try:
+            rates[key] = float(raw)
+        except (TypeError, ValueError):
+            missing.append(key)
+    if not missing:
+        return rates
+
+    codes = ",".join(FX_SINA_CODES[key] for key in missing)
+    try:
+        response = requests.get(
+            f"https://hq.sinajs.cn/list={codes}",
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                "Referer": "https://finance.sina.com.cn",
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        response.encoding = "gbk"
+        text = response.text
+    except Exception as exc:
+        logging.warning("汇率获取失败，使用默认汇率: %s", exc)
+        return rates
+
+    for key in missing:
+        match = re.search(
+            f'var hq_str_{FX_SINA_CODES[key]}="([^"]*)"', text
+        )
+        if not match or not match.group(1):
+            logging.warning("%s 汇率无数据，使用默认值", key)
+            continue
+        try:
+            value = float(match.group(1).split(",")[1])
+        except (ValueError, IndexError):
+            continue
+        if value > 0:
+            rates[key] = value
+    return rates
+
+
 def update_volume_history(symbol, volume, state):
     today = state_date()
     hist_key = f"vol_hist_{symbol}"
@@ -340,10 +427,13 @@ def _try_fetch_em_avg_volume(symbol):
     return 0
 
 
-def detect_alerts(cfg, quotes, state, quotes_complete=True):
+def detect_alerts(cfg, quotes, state, quotes_complete=True, fx=None):
     alerts = []
     group_pnl = {group: 0.0 for group in GROUP_ORDER}
     alerts_cfg = cfg["alerts"]
+    fx = fx or {}
+    usd_cny = float(fx.get("usd_cny") or DEFAULT_FX["usd_cny"])
+    hkd_cny = float(fx.get("hkd_cny") or DEFAULT_FX["hkd_cny"])
 
     for pos in cfg["positions"]:
         symbol = pos["symbol"]
@@ -374,7 +464,20 @@ def detect_alerts(cfg, quotes, state, quotes_complete=True):
             (current - cost) / cost * 100 if cost > 0 else 0
         )
         group_pnl.setdefault(market, 0.0)
-        group_pnl[market] += quantity * (current - prev_close)
+        # 组合盈亏统一折算成该市场的显示币种（美股=美元，港股科技/黄金=人民币）
+        contribution = quantity * (current - prev_close)
+        if market == "hk" and pos.get("pnl_mode", "value") == "value":
+            # 指数类标的没有货币价格，按"持仓金额 × 当日涨跌幅"折算人民币
+            contribution = (
+                position_value_cny(pos, quantity, cost)
+                * daily_change_pct
+                / 100
+            )
+        elif market == "hk":
+            contribution *= hkd_cny
+        elif market == "metal":
+            contribution *= usd_cny
+        group_pnl[market] += contribution
 
         last_price_key = f"lastprice_{symbol}"
         previous_price = float(state.get(last_price_key, 0) or 0)
@@ -461,12 +564,11 @@ def detect_alerts(cfg, quotes, state, quotes_complete=True):
         ):
             continue
 
+        symbol = CURRENCY_SYMBOL[GROUP_CURRENCY.get(group, "USD")]
         if group == "us":
-            msg = f"美股组合当日合计盈亏 ${pnl:+.2f}"
-        elif group == "hk":
-            msg = f"港股科技当日变动 {pnl:+.2f} 点"
+            msg = f"美股组合当日合计盈亏 {symbol}{pnl:+.2f}"
         else:
-            msg = f"黄金当日变动 ${pnl:+.2f}"
+            msg = f"{group_label(group)}当日盈亏 {symbol}{pnl:+.2f}"
 
         alerts.append(
             {
@@ -764,8 +866,15 @@ def main():
         len(symbols),
     )
 
+    fx = fetch_fx_rates(cfg)
+    logging.info(
+        "汇率: 美元/人民币 %.4f, 港币/人民币 %.4f",
+        fx["usd_cny"],
+        fx["hkd_cny"],
+    )
+
     alerts, group_pnl = detect_alerts(
-        cfg, quotes, state, quotes_complete=quotes_complete
+        cfg, quotes, state, quotes_complete=quotes_complete, fx=fx
     )
     if quotes_complete:
         logging.info("行情检测完成，触发异动 %s 条", len(alerts))
@@ -775,7 +884,7 @@ def main():
             len(alerts),
         )
     logging.info(
-        "分组当日盈亏: 美股 $%+.2f, 港股科技 %+.2f 点, 黄金 $%+.2f",
+        "分组当日盈亏: 美股 $%+.2f, 港股科技 ¥%+.2f, 黄金 ¥%+.2f",
         group_pnl.get("us", 0.0),
         group_pnl.get("hk", 0.0),
         group_pnl.get("metal", 0.0),
