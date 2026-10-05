@@ -104,6 +104,19 @@ def group_label(group):
     return GROUP_LABELS.get(group, GROUP_LABELS["us"])
 
 
+def portfolio_pnl_threshold(alerts_cfg, group):
+    """组合盈亏阈值。
+
+    优先取 alerts.portfolio_daily_pnl_by_group[group]（按市场分别设置），
+    没配置该市场时回退到全局 alerts.portfolio_daily_pnl。
+    """
+    overrides = alerts_cfg.get("portfolio_daily_pnl_by_group") or {}
+    raw = overrides.get(group)
+    if raw in (None, ""):
+        raw = alerts_cfg.get("portfolio_daily_pnl", 0)
+    return float(raw)
+
+
 def log_label(value):
     salt = (os.environ.get("LOG_SALT") or os.environ.get("STATE_KEY") or "local")
     digest = hmac.new(
@@ -560,7 +573,7 @@ def detect_alerts(cfg, quotes, state, quotes_complete=True, fx=None):
         pnl = group_pnl.get(group, 0.0)
         if (
             not quotes_complete
-            or abs(pnl) < alerts_cfg["portfolio_daily_pnl"]
+            or abs(pnl) < portfolio_pnl_threshold(alerts_cfg, group)
         ):
             continue
 
