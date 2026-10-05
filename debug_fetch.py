@@ -11,6 +11,7 @@ from monitor import (  # noqa: E402
     detect_alerts,
     fetch_sina_realtime,
     get_avg_volume,
+    group_label,
     load_config,
     load_state,
 )
@@ -50,13 +51,22 @@ for position in positions:
     )
 
 quotes_complete = all(symbol in quotes for symbol in symbols)
-alerts, pnl = detect_alerts(
+alerts, group_pnl = detect_alerts(
     cfg, quotes, state, quotes_complete=quotes_complete
 )
 print()
-print(f"组合当日盈亏: ${pnl:+.2f}")
+print(f"美股组合当日盈亏: ${group_pnl.get('us', 0.0):+.2f}")
+print(f"港股科技当日变动: {group_pnl.get('hk', 0.0):+.2f} 点")
+print(f"黄金当日变动: ${group_pnl.get('metal', 0.0):+.2f}")
 if not quotes_complete:
     print("行情不完整，已跳过组合盈亏提醒。")
 print(f"触发异动: {len(alerts)} 条")
 for alert in alerts:
-    print(" -", alert["type"], "|", alert["msg"])
+    print(
+        " -",
+        group_label(alert.get("group", "us")),
+        "|",
+        alert["type"],
+        "|",
+        alert["msg"],
+    )
