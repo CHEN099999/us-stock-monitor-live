@@ -29,6 +29,12 @@ BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.yaml"
 BEIJING_TZ = dt.timezone(dt.timedelta(hours=8))
 UTC_TZ = dt.timezone.utc
+GROUP_LABELS = {
+    "us": "美股",
+    "hk": "港股科技",
+    "metal": "黄金",
+}
+GROUP_ORDER = ("us", "hk", "metal")
 
 
 def load_dotenv():
@@ -61,6 +67,23 @@ def utc_now():
 def state_date():
     # UTC date keeps a US session on one logical monitoring date.
     return utc_now().date().isoformat()
+
+
+def alert_group_key(cfg, alert):
+    group = str(alert.get("group", "")).strip().lower()
+    if group in GROUP_LABELS:
+        return group
+
+    symbol = str(alert.get("symbol", ""))
+    for position in cfg.get("positions", []):
+        if str(position.get("symbol", "")) == symbol:
+            market = str(position.get("market", "us")).strip().lower()
+            return market if market in GROUP_LABELS else "us"
+    return "us"
+
+
+def group_label(group):
+    return GROUP_LABELS.get(group, GROUP_LABELS["us"])
 
 
 def log_label(value):
@@ -319,7 +342,7 @@ def _try_fetch_em_avg_volume(symbol):
 
 def detect_alerts(cfg, quotes, state, quotes_complete=True):
     alerts = []
-    portfolio_daily_pnl = 0.0
+    group_pnl = {group: 0.0 for group in GROUP_ORDER}
     alerts_cfg = cfg["alerts"]
 
     for pos in cfg["positions"]:
@@ -350,7 +373,8 @@ def detect_alerts(cfg, quotes, state, quotes_complete=True):
         cost_change_pct = (
             (current - cost) / cost * 100 if cost > 0 else 0
         )
-        portfolio_daily_pnl += quantity * (current - prev_close)
+        group_pnl.setdefault(market, 0.0)
+        group_pnl[market] += quantity * (current - prev_close)
 
         last_price_key = f"lastprice_{symbol}"
         previous_price = float(state.get(last_price_key, 0) or 0)
@@ -373,6 +397,7 @@ def detect_alerts(cfg, quotes, state, quotes_complete=True):
                         f"{name}({symbol}) 日内 {daily_change_pct:+.2f}%，"
                         f"现价 {current:.2f}"
                     ),
+                    "group": market,
                     "key": f"{symbol}_{logical_date}_daily",
                 }
             )
@@ -386,6 +411,7 @@ def detect_alerts(cfg, quotes, state, quotes_complete=True):
                         f"{name}({symbol}) 较成本 {cost_change_pct:+.2f}%"
                         f"（成本{cost:.2f}，现价{current:.2f}）"
                     ),
+                    "group": market,
                     "key": f"{symbol}_{logical_date}_cost",
                 }
             )
@@ -404,6 +430,7 @@ def detect_alerts(cfg, quotes, state, quotes_complete=True):
                         f"（今日{today_volume / 1e6:.1f}M / "
                         f"均量{avg_volume / 1e6:.1f}M）"
                     ),
+                    "group": market,
                     "key": f"{symbol}_{logical_date}_volume",
                 }
             )
@@ -421,25 +448,38 @@ def detect_alerts(cfg, quotes, state, quotes_complete=True):
                         f"{name}({symbol}) 近5分钟 {gap_pct:+.2f}%，"
                         f"现价 {current:.2f}"
                     ),
+                    "group": market,
                     "key": f"{symbol}_{logical_date}_gap_{bucket}",
                 }
             )
 
-    if (
-        quotes_complete
-        and abs(portfolio_daily_pnl) >= alerts_cfg["portfolio_daily_pnl"]
-    ):
+    for group in GROUP_ORDER:
+        pnl = group_pnl.get(group, 0.0)
+        if (
+            not quotes_complete
+            or abs(pnl) < alerts_cfg["portfolio_daily_pnl"]
+        ):
+            continue
+
+        if group == "us":
+            msg = f"美股组合当日合计盈亏 ${pnl:+.2f}"
+        elif group == "hk":
+            msg = f"港股科技当日变动 {pnl:+.2f} 点"
+        else:
+            msg = f"黄金当日变动 ${pnl:+.2f}"
+
         alerts.append(
             {
-                "symbol": "PORTFOLIO",
-                "name": "组合",
+                "symbol": f"PORTFOLIO_{group.upper()}",
+                "name": group_label(group),
                 "type": "组合盈亏",
-                "msg": f"组合当日盈亏 ${portfolio_daily_pnl:+.2f}",
-                "key": f"PORTFOLIO_{state_date()}_pnl",
+                "msg": msg,
+                "group": group,
+                "key": f"PORTFOLIO_{group.upper()}_{state_date()}_pnl",
             }
         )
 
-    return alerts, portfolio_daily_pnl
+    return alerts, group_pnl
 
 
 def _state_cipher():
@@ -656,10 +696,14 @@ def push_wecom(webhook, title, content):
     return False
 
 
-def send_alerts(cfg, alerts):
+def send_alerts(cfg, alerts, group=None):
     if not alerts:
         return True
-    title = f"【持仓异动】{len(alerts)}条提醒 {beijing_now().strftime('%H:%M')}"
+    group = group or alert_group_key(cfg, alerts[0])
+    title = (
+        f"【{group_label(group)}异动】"
+        f"{len(alerts)}条提醒 {beijing_now().strftime('%H:%M')}"
+    )
     content = "\n\n".join(
         f"⚠️ {alert['type']}\n{alert['msg']}" for alert in alerts
     )
@@ -720,7 +764,7 @@ def main():
         len(symbols),
     )
 
-    alerts, pnl = detect_alerts(
+    alerts, group_pnl = detect_alerts(
         cfg, quotes, state, quotes_complete=quotes_complete
     )
     if quotes_complete:
@@ -730,12 +774,19 @@ def main():
             "行情不完整，触发异动 %s 条，已跳过组合盈亏提醒",
             len(alerts),
         )
+    logging.info(
+        "分组当日盈亏: 美股 $%+.2f, 港股科技 %+.2f 点, 黄金 $%+.2f",
+        group_pnl.get("us", 0.0),
+        group_pnl.get("hk", 0.0),
+        group_pnl.get("metal", 0.0),
+    )
 
     pending = state.setdefault("pending_alerts", [])
     pending_keys = {alert["key"] for alert in pending}
     for alert in alerts:
         if alert_fingerprint(alert["key"]) in ledger:
             continue
+        alert["group"] = alert_group_key(cfg, alert)
         if alert["key"] not in state:
             state[alert["key"]] = "pending"
         if alert["key"] not in pending_keys:
@@ -743,18 +794,42 @@ def main():
             pending_keys.add(alert["key"])
     state["pending_alerts"] = pending[-100:]
 
-    if pending and send_alerts(cfg, pending):
+    if pending:
         sent_at = beijing_now().isoformat()
+        pending_by_group = {group: [] for group in GROUP_ORDER}
         for alert in pending:
-            state[alert["key"]] = sent_at
-            ledger[alert_fingerprint(alert["key"])] = sent_at
-        state["pending_alerts"] = []
-        logging.info("已成功推送 %s 条异动", len(pending))
-    elif pending:
-        logging.warning(
-            "有 %s 条异动待重试，本次不写入已发送状态",
-            len(pending),
-        )
+            group = alert_group_key(cfg, alert)
+            pending_by_group.setdefault(group, []).append(alert)
+
+        remaining = []
+        sent_count = 0
+        failed_groups = []
+        other_groups = [
+            group for group in pending_by_group
+            if group not in GROUP_ORDER
+        ]
+        for group in list(GROUP_ORDER) + other_groups:
+            group_pending = pending_by_group.get(group, [])
+            if not group_pending:
+                continue
+
+            if send_alerts(cfg, group_pending, group):
+                for alert in group_pending:
+                    state[alert["key"]] = sent_at
+                    ledger[alert_fingerprint(alert["key"])] = sent_at
+                sent_count += len(group_pending)
+            else:
+                remaining.extend(group_pending)
+                failed_groups.append(group_label(group))
+
+        state["pending_alerts"] = remaining[-100:]
+        if sent_count:
+            logging.info("已成功推送 %s 条异动", sent_count)
+        if failed_groups:
+            logging.warning(
+                "以下分组推送失败，保留待重试: %s",
+                ", ".join(failed_groups),
+            )
 
     save_state(cfg, state)
     save_ledger(cfg, ledger)
